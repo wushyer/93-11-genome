@@ -1,0 +1,503 @@
+1. Gene prediction based on transcriptome
+
+hisat2-build -p 32 Rice_9311.Genome.fa Rice 
+
+ls RawData/|perl -ane 'if (/(BX24-\d+)_1.paired.fastq.gz/){$tag=$1;$id=$F[0];$id=~s/_1(.paired.fastq.gz)/_2$1/;print "hisat2 -x Rice -1 RawData/$F[0] -2 RawData/$id --fr --rna-strandness RF -S $tag.sam -p 16 >$tag.hisat.log 2>$tag.hisat.error \n";print "samtools view -@ 16 -Su $tag.sam |samtools sort - -@ 16 -o $tag.sorted.bam >$tag.sort.log 2>$tag.sort.error \n"}' >cmd.sh
+
+
+ls ../ |perl -ane 'if(/(\S+).sorted.bam/){$tag=$1;mkdir $tag;print "cd Stringtie01/$tag\n";print "stringtie Trscript/$F[0] -l $tag -p 16 -o $tag.gtf -A $tag.abund --rf >$tag.stringtie.log 2>$tag.stringtie.error \n"}'>stringtie.sh
+
+sh stringtie.sh 
+
+#Taco
+find /Dir/Stringtie -name "*gtf" >gtf.list
+taco_run gtf.list -p 12 -o taco_run --ref-genome-fasta Rice_9311.Genome.fa
+
+gffread -M -o Transcript.gff taco_run/assembly.gtf
+gffread Transcript.gff -g Rice_9311.Genome.fa -w Transcript.fa &
+
+#TransDecoder
+
+TransDecoder.LongOrfs -t Transcript.fa
+
+perl seq_split.pl longest_orfs.pep 20
+ls |perl -ane 'if(/(\S+)\.(\d+)/){$i=$2;print "nohup hmmscan --cpu 4 --domtblout pfam.domtblout.split.$i Pfam-A.hmm longest_orfs.pep.split.$i > hmmscan.$i.log 2>&1 &\n"}' >pfam.sh
+sh pfam.sh
+
+cat pfam.domtblout.split.* > pfam.domtblout
+
+nohup TransDecoder.Predict -t Transcript.fa -T 2000 --retain_pfam_hits /Dir/pfam.domtblout
+
+grep '>' Transcript.fa.transdecoder.pep |grep complete |perl -ane '$id=$1 if />(\w+)/;$s=$1 if /score=([\d\.]+)/;print "$F[0]\t$id\t$s\n"' |perl -ane '$hash{$F[1]}{$F[0]}=$F[2];END{for $g(keys %hash){$best=(sort {$hash{$g}{$b}->{L}<=>$hash{$g}{$a}->{L}} keys %{$hash{$g}})[0];$id=$1 if $best=~/(\w+)/;print "$id\t$best\t$hash{$g}{$best}\n"}}' |sed 's/>//' >pep.selected.out &
+
+perl -ane 'if($F[2]=~/exon/){$id=$1 if /transcript_id\s+\"(\w+)/;$F[8]="ID=$id;Target=$id";$inf=join"\t",@F[0..8];print "$inf\n" }' /Dir/Taco/taco_run/assembly.gtf >Transcript.fa.assembly.gtf
+
+nohup cdna_alignment_orf_to_genome_orf.pl Transcript.fa.transdecoder.gff3 Transcript.fa.assembly.gtf Transcript.fa >Transcript.fa.transdecoder.genome.gff3 
+
+perl -ane 'BEGIN{open IN,"pep.selected.out";while(<IN>){chomp;@A=split;$ids{$A[1]}=1}} if (/ID=.*?(T\w+\.p\d+)/i){$id=$1;print if $ids{$id}}' /Dir/TransDecoder/Transcript.fa.transdecoder.gff3 >Transcript.fa.transdecoder.seleceted.gff3 
+
+nohup cdna_alignment_orf_to_genome_orf.pl Transcript.fa.transdecoder.seleceted.gff3 Transcript.fa.assembly.gtf Transcript.fa >Transcript.fa.transdecoder.seleceted.genome.gff3 
+
+
+2. Gene prediction based on homolog proteins
+#Nipponbare protein
+gth -genomic Rice_9311.Genome.fa -protein IRGSP_protein.fa -species rice -gff3out -prminmatchlen 12 -prseedlength 9 -skipalignmentout -o IRGSP.gff3 > log 2> error &
+
+awk '$3=="CDS"' IRGSP.gff3 >IRGSP.cds.gff3
+
+gffread IRGSP.cds.gff3 -g Rice_9311.Genome.fa -y IRGSP_protein.fa
+
+3.De novo gene prediction
+#Augustus
+(1)Run1
+augustus --strand=both --genemodel=complete --extrinsicCfgFile=/Dir/extrinsic.M.RM.E.W.cfg --AUGUSTUS_CONFIG_PATH=/Dir/miniconda2/config --uniqueGeneId=true --alternatives-from-evidence=false --alternatives-from-sampling=false --gff3=on --UTR=off --protein=on --codingseq=on --species=rice --hintsfile=hints.repeats.gff Rice_9311.Genome.masked.fa > Rice.augustus.gff 2> run_augustus.error
+
+(2)Run2
+augustus --strand=both --genemodel=complete --extrinsicCfgFile=/Dir/extrinsic.M.RM.E.W.cfg --AUGUSTUS_CONFIG_PATH=/Dir/config --uniqueGeneId=true --alternatives-from-evidence=false --alternatives-from-sampling=false --gff3=on --UTR=off --protein=on --codingseq=on --species=rice Rice_9311.Genome.fa > Rice.augustus.gff 2> run_augustus.error
+
+
+
+makeblastdb -dbtype prot -in Transcript.fa.transdecoder.pep -out Transcript
+makeblastdb -dbtype prot -in IRGSP.gth.protein.fa -out Gth
+makeblastdb -dbtype prot -in Augustus.protein.fa -out Augustus
+makeblastdb -dbtype prot -in IRGSP.protein.fa -out IRGSP
+
+perl seq_split.pl Augustus.protein.fa 32
+perl seq_split.pl IRGSP.gth.protein.fa 32
+perl seq_split.pl Transcript.fa.transdecoder.pep 32
+
+ls |perl -ane 'if(/(\S+)\.(\d+)/){$i=$2;print "nohup blastp -query $F[0] -db Transcript -out Augustus_Transcript.out.$i -evalue 1e-5 -outfmt 6 -num_threads 4 >$i.log 2> $i.error &\n"}' >Augustus_Transcript.sh
+ls |perl -ane 'if(/(\S+)\.(\d+)/){$i=$2;print "nohup blastp -query $F[0] -db Transcript -out Gth_Transcript.out.$i -evalue 1e-5 -outfmt 6 -num_threads 4 >$i.log 2> $i.error &\n"}' >Gth_Transcript.sh
+ls |perl -ane 'if(/(\S+)\.(\d+)/){$i=$2;print "nohup blastp -query $F[0] -db IRGSP -out Transcript_IRGSP.out.$i -evalue 1e-5 -outfmt 6 -num_threads 4 >$i.log 2> $i.error &\n"}' >Transcript_IRGSP.sh
+ls |perl -ane 'if(/(\S+)\.(\d+)/){$i=$2;print "nohup blastp -query $F[0] -db Gth -out Transcript_Gth.out.$i -evalue 1e-5 -outfmt 6 -num_threads 4 >$i.log 2> $i.error &\n"}' >Transcript_Gth.sh
+ls |perl -ane 'if(/(\S+)\.(\d+)/){$i=$2;print "nohup blastp -query $F[0] -db Augustus -out Transcript_Augustus.out.$i -evalue 1e-5 -outfmt 6 -num_threads 4 >$i.log 2> $i.error &\n"}' >Transcript_Augustus.sh
+
+sh Augustus_Transcript.sh
+sh Gth_Transcript.sh
+sh Transcript_IRGSP.sh
+sh Transcript_Gth.sh
+sh Transcript_Augustus.sh
+
+
+faSize -detailed Transcript.fa.transdecoder.pep >Transcript.size
+faSize -detailed IRGSP.gth.protein.fa >Gth.size
+faSize -detailed IRGSP.protein.fasta >IRGSP.size
+faSize -detailed Augustus.protein.fa >Augustus.size
+
+cat ../Transcript/Transcript_Augustus.out.* >Transcript_Augustus.out 
+cat ../Transcript/Transcript_IRGSP.out.* >Transcript_IRGSP.out
+cat ../Transcript/Transcript_Gth.out.* >Transcript_Gth.out
+cat ../Augustus/Augustus_Transcript.out.* >Augustus_Transcript.out
+cat ../Gth/Gth_Transcript.out.* >Gth_Transcript.out
+
+awk '$3>90' Transcript_Augustus.out |perl blast.best2.pl - >Transcript_Augustus.out.best
+awk '$3>90' Transcript_IRGSP.out |perl blast.best2.pl - >Transcript_IRGSP.out.best
+awk '$3>90' Transcript_Gth.out |perl blast.best2.pl - >Transcript_Gth.out.best
+awk '$3>90' Augustus_Transcript.out |perl blast.best2.pl - >Augustus_Transcript.out.best
+awk '$3>90' Gth_Transcript.out |perl blast.best2.pl - >Gth_Transcript.out.best
+
+perl /disk1/wangsen/Progrm/merge_files.pl -r Transcript_Augustus.out.best  -n 1 -i Transcript.size -c 1 -o Transcript_Augustus.merge1
+perl /disk1/wangsen/Progrm/merge_files.pl -r Transcript_Augustus.merge1 -n 2 -i Augustus.size -c 1 -o Transcript_Augustus.merge2 
+perl /disk1/wangsen/Progrm/merge_files.pl -r Transcript_IRGSP.out.best  -n 1 -i Transcript.size -c 1 -o Transcript_IRGSP.merge1
+perl /disk1/wangsen/Progrm/merge_files.pl -r Transcript_IRGSP.merge1 -n 2 -i IRGSP.size -c 1 -o Transcript_IRGSP.merge2
+perl /disk1/wangsen/Progrm/merge_files.pl -r Transcript_Gth.out.best  -n 1 -i Transcript.size -c 1 -o Transcript_Gth.merge1
+perl /disk1/wangsen/Progrm/merge_files.pl -r Transcript_Gth.merge1 -n 2 -i Gth.size -c 1 -o Transcript_Gth.merge2
+perl /disk1/wangsen/Progrm/merge_files.pl -r Augustus_Transcript.out.best  -n 1 -i Augustus.size -c 1 -o Augustus_Transcript.merge1
+perl /disk1/wangsen/Progrm/merge_files.pl -r Augustus_Transcript.merge1 -n 2 -i Transcript.size -c 1 -o Augustus_Transcript.merge2
+perl /disk1/wangsen/Progrm/merge_files.pl -r Gth_Transcript.out.best  -n 1 -i Gth.size -c 1 -o Gth_Transcript.merge1
+perl /disk1/wangsen/Progrm/merge_files.pl -r Gth_Transcript.merge1 -n 2 -i Transcript.size -c 1 -o Gth_Transcript.merge2
+
+4.Transcript filter
+
+perl -ane 'if(/>(\S+)/){$pid=$1;$tid=$pid;$tid=~s/\.p\d+//;$t=(/complete/)?"complete":"Partial";$l=$1 if /len:(\d+)/;print "$tid\t$pid\t$t\n";}' Transcript.fa.transdecoder.pep >Tr.id
+faSize -detailed Transcript.fa.transdecoder.pep >Tr.len
+
+perl merge_files.pl -r Tr.id -n 2 -i Tr.len -c 1 -o Tr.id.len
+cut -f 1-3,5 Tr.id.len >Tr.T_P.len
+
+perl merge_files.pl -r Tr.T_P.len -n 2 -i Transcript_IRGSP.merge2 -c 1 -o Tr.T_P.len.Imerge
+
+perl merge_files.pl -r Tr.T_P.len -n 2 -i Transcript_Gth.merge2 -c 1 -o Tr.T_P.len.Gmerge 
+ 
+perl merge_files.pl -r Tr.T_P.len -n 2 -i Transcript_Augustus.merge2 -c 1 -o Tr.T_P.len.Amerge 
+
+
+perl -ane 'next if $F[4] eq "-";if ($InfComp{$F[0]}){if ($InfComp{"$F[0]"}->{S} < $F[15]){$InfComp{"$F[0]"}->{S}=$F[15];$InfComp{"$F[0]"}->{I}=$_;}}else{$InfComp{"$F[0]"}->{S}=$F[15];$InfComp{"$F[0]"}->{I}=$_;}END{for my $idP(sort keys %InfComp){@F=split/\s+/,$InfComp{$idP}->{I};print "$idP\t$F[1]\n";}}' Tr.T_P.len.Imerge >Tr.T_P.len.Imerge.best 
+
+perl -ane 'next if $F[4] eq "-";if ($InfComp{"$F[0]"}){if ($InfComp{"$F[0]"}->{S} < $F[15]){$InfComp{"$F[0]"}->{S}=$F[15];$InfComp{"$F[0]"}->{I}=$_;}}else{$InfComp{"$F[0]"}->{S}=$F[15];$InfComp{"$F[0]"}->{I}=$_;}END{for my $idP(sort keys %InfComp){@F=split/\s+/,$InfComp{$idP}->{I};print "$idP\t$F[1]\n";}}' Tr.T_P.len.Gmerge >Tr.T_P.len.Gmerge.best
+
+perl -ane 'next if $F[4] eq "-";if ($InfComp{"$F[0]"}){if ($InfComp{"$F[0]"}->{S} < $F[15]){$InfComp{"$F[0]"}->{S}=$F[15];$InfComp{"$F[0]"}->{I}=$_;}}else{$InfComp{"$F[0]"}->{S}=$F[15];$InfComp{"$F[0]"}->{I}=$_;}END{for my $idP(sort keys %InfComp){@F=split/\s+/,$InfComp{$idP}->{I};print "$idP\t$F[1]\n";}}' Tr.T_P.len.Amerge >Tr.T_P.len.Amerge.best 
+
+perl merge_files.pl -r Tr.T_P.len -n 1 -i Tr.T_P.len.Imerge.best  -c 1 -i Tr.T_P.len.Gmerge.best  -c 1 -i Tr.T_P.len.Amerge.best -c 1 -o Tr.merge 
+
+awk '$5=="-" && $7=="-" && $9=="-"' Tr.merge |cut -f 1-4 >Tr.merge.noHom.id
+
+perl -ane 'if ($InfComp{$F[0]}){if ($InfComp{$F[0]}->{S} < $F[3]){$InfComp{"$F[0]"}->{S}=$F[3];$InfComp{$F[0]}->{I}=$_;}}else{$InfComp{$F[0]}->{S}=$F[3];$InfComp{$F[0]}->{I}=$_;}END{for my $idP(sort keys %InfComp){@F=split/\s+/,$InfComp{$idP}->{I};print "$idP\t$F[1]\n";}}' Tr.merge.noHom.id >Tr.merge.noHom.id.best
+
+perl -ane 'next if $F[4] eq "-" && $F[6] eq "-" && $F[8] eq "-";if($F[4] ne "-"){print "$F[4]\t$F[5]\n"}elsif($F[6] ne "-"){print "$F[6]\t$F[7]\n"}else{print "$F[8]\t$F[9]\n"}' Tr.merge |sort |uniq >Tr.merge.Hom.id.best
+
+cat Tr.merge.Hom.id.best Tr.merge.noHom.id.best >Tr.id.best
+
+perl merge_files.pl -r Tr.id.best -n 2 -i Transcript_IRGSP.merge2 -c 1 -o Tr.id.best.merge
+
+perl -ane 'if ($F[2] eq "-"){print "$F[0]\t$F[1]\n";next}print "$F[0]\t$F[1]\n" if abs($F[11]-$F[10]) <= $F[17]*0.9 && $F[15] < $F[17]' Tr.id.best.merge >Tr.id.best.noI
+
+perl merge_files.pl -r Tr.id.best.noI -n 2 -i Transcript_Gth.merge2 -c 1 -o Tr.id.best.noI.merge
+
+perl -ane 'if ($F[2] eq "-"){print "$F[0]\t$F[1]\n";next}print "$F[0]\t$F[1]\n" if abs($F[11]-$F[10]) <= $F[17]*0.9 && $F[15] < $F[17]' Tr.id.best.noI.merge >Tr.id.best.noIG
+
+perl merge_files.pl -r Tr.id.best.noIG -n 2 -i Transcript_Augustus.merge2 -c 1 -o Tr.id.best.noIG.merge
+
+perl -ane 'if ($F[2] eq "-"){print "$F[0]\t$F[1]\n";next}print "$F[0]\t$F[1]\n" if abs($F[11]-$F[10]) <= $F[17]*0.9 && $F[15] < $F[17]' Tr.id.best.noIG.merge >Tr.id.best.noIGA
+
+
+perl merge_files.pl -r Tr.id.best.noIGA -n 2 -i Transcript_IRGSP.merge2 -c 1 -o Tr.id.best.noIGA.merge
+
+perl -ane 'if ($F[2] eq "-"){print "$F[0]\t$F[1]\n";next}print STDERR "$F[0]\t$F[1]\n" if abs($F[11]-$F[10]) <= $F[17]*0.9 && $F[15] < $F[17]' Tr.id.best.noIGA.merge >Tr.id.best.noIGA.noHI 2>Tr.id.best.noIGA.lowHI
+
+perl merge_files.pl -r Tr.id.best.noIGA.noHI -n 2 -i Transcript_Gth.merge2 -c 1 -o Tr.id.best.noI.merge -c 1 -o Tr.id.best.noIGA.noHI.merge
+
+perl -ane 'if ($F[2] eq "-"){print "$F[0]\t$F[1]\n";next}print STDERR "$F[0]\t$F[1]\n" if abs($F[11]-$F[10]) <= $F[17]*0.9 && $F[15] < $F[17]' Tr.id.best.noIGA.noHI.merge >Tr.id.best.noIGA.noHIG 2>Tr.id.best.noIGA.lowHIG
+
+cat Tr.id.best.noIGA.lowHIG Tr.id.best.noIGA.lowHIG |cut -f 2 >Tr.del.id
+
+grep -f Tr.del.id Tr.id.best -v >Tr.filter.id.best
+
+awk '$3=="CDS"' /disk2/wangsen/9311/TimeCourse/9311/Trscript/Stringtie1/Taco/TransDecoder/Transcript.fa.transdecoder.genome.gff3 |perl -ane 'BEGIN{open IN,"Tr.filter.id.best";while(<IN>){chomp;@A=split;$ids{$A[1]}=1}}$id=$1 if /Parent=([^;\s]+)/; print if $ids{$id}' >Tr.selected.gff3
+
+5.Filter based on protein prediction
+
+perl -ane '($max,$min)=($F[13]>$F[15])?($F[13],$F[15]):($F[15],$F[13]);print "$F[0]\t$F[14]\n" if abs($F[6]-$F[8]) <10 && abs($F[7]-$F[9]) <10 && $min/$max >=0.9' Gth_IRGSP.merge2  >Gth_IRGSP.best
+
+perl merge_files.pl -r Gth_IRGSP.best -n 1 -i Gth.protein.id -c 1 -o Gth_IRGSP.best.merge
+
+perl -ane '$id1=$F[1];$id2=$F[3];$id1=~s/-\d+//;$id2=~s/-\d+//;print if $id1 eq $id2' Gth_IRGSP.best.merge|cut -f 1 >Gth.best.id
+
+perl -ane 'BEGIN{open IN,"Gth.best.id";while(<IN>){chomp;@A=split;$ids{$A[0]}=1}}$id=$1 if /Parent=([^;\s]+)/; print if $ids{$id}' IRGSP.cds.gff3 >IRGSP.selected.gff3
+
+
+6.Combine the result and put in IGV to be manually checked
+
+cp ../Transcript/Tr.selected.gff3 ./
+cp ../Gth/IRGSP.selected.gff3 ./
+cp /Dir/Rice.augustus1.cds.gff3 ./
+cp /Dir/Rice.augustus2.cds.gff3 ./
+
+cat *.gff3 >all.gff3
+
+gffread all.gff3 -g Rice_9311.Genome.fa -o all.cluster.gff3 --cluster-only &
+gffread all.gff3 -g Rice_9311.Genome.fa -o all.merge.gff3 -M -d all.dup.out
+
+perl -ne 'if(/ID=([^;\s]+);.*transcripts=(\S+)/){$gene=$1;$trs=$2;print "$gene\t$trs\n" }' all.cluster.gff3 |perl -ane 'if($F[1]=~/TU/ && $F[1]=~/Chr/ && $F[1]=~/mRNA/){print "T_P_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/Chr/){print "T_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/mRNA/){print "T_P\t$_"}elsif($F[1]=~/TU/){print "T\t$_"}elsif($F[1]=~/Chr/ && $F[1]=~/mRNA/){print "P_A\t$_"}elsif($F[1]=~/A1_/ && $F[1]=~/A2_/){print "A\t$_"}elsif($F[1]=~/mRNA/){print "P\t$_"}' >Tr.id
+perl -ane 'for $t(split/,/,$F[2]){print "$F[0]\t$F[1]\t$t\n"}' Tr.id >Tr2.id
+
+perl -ane '$inft="-";if(/TU/){@tmp=();while(/(TU\S+)/g){push @tmp,$1}$inft=join",",@tmp}$infm="-";if(/mRNA/){@tmp=();while(/(mRNA\S+)/g){push @tmp,$1}$infm=join",",@tmp}$infa1="-";if(/A1_/){@tmp=();while(/(A1_\S+)/g){push @tmp,$1}$infa1=join",",@tmp}$infa2="-";if(/A2_/){@tmp=();while(/(A2_\S+)/g){push @tmp,$1}$infa2=join",",@tmp};print "$inft\t$infm\t$infa1\t$infa2\n"' all.dup.out >dup.stat
+
+gffread Tr.selected.gff3 -g Rice_9311.Genome.fa -o Transcript.cluster.gff3 --cluster-only 
+gffread IRGSP.selected.gff3 -g Rice_9311.Genome.fa -o IRGSP.cluster.gff3 --cluster-only 
+
+perl -ane 'if(/ID=([^;]+);.*transcripts=(\S+)/){$id1=$1;$id2=$2;print "$id1\t$id2\n"}' Transcript.cluster.gff3 >Transcript.G_T.id
+perl -ane 'if(/ID=([^;]+);.*transcripts=(\S+)/){$id1=$1;$id2=$2;print "$id1\t$id2\n"}' IRGSP.cluster.gff3 >IRGSP.G_T.id
+
+perl Gene_id.pl Transcript.G_T.id IRGSP.G_T.id Tr.id >Tr.stat 2>error &
+perl stat.pl Tr.stat >Gene_Stat 2>error
+
+vi del.id.tmp
+perl -ane 'while(/(A\d+_[^,\s]+)/g){print "$1\n"}' Gene_Stat |grep A1_Chr04.g14495.t1 -v |grep A1_Chr09.g27067.t1 -v >del.Au.id
+
+grep Chr del.id.tmp -v|cat del.Au.id - >del.id
+
+7. Further polish
+perl -ane 'BEGIN{open IN,"../del.id";while(<IN>){chomp;@F=split;$ids{$F[0]}=1}}$id=$1 if /Parent=([^;\s]+)/; print unless $ids{$id}' ../all.gff3 >all.selected.gff3
+
+gffread all.selected.gff3 -g Rice_9311.Genome.fa -o all.cluster.gff3 --cluster-only
+gffread all.selected.gff3 -g Rice_9311.Genome.fa -o all.merge.gff3 -M -d all.dup.out
+
+perl -ne 'if(/ID=([^;\s]+);.*transcripts=(\S+)/){$gene=$1;$trs=$2;print "$gene\t$trs\n" }' all.cluster.gff3 |perl -ane 'if($F[1]=~/TU/ && $F[1]=~/Chr/ && $F[1]=~/mRNA/){print "T_P_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/Chr/){print "T_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/mRNA/){print "T_P\t$_"}elsif($F[1]=~/TU/){print "T\t$_"}elsif($F[1]=~/Chr/ && $F[1]=~/mRNA/){print "P_A\t$_"}elsif($F[1]=~/A1_/ && $F[1]=~/A2_/){print "A\t$_"}elsif($F[1]=~/mRNA/){print "P\t$_"}' >Tr.id
+perl -ane 'for $t(split/,/,$F[2]){print "$F[0]\t$F[1]\t$t\n"}' Tr.id >Tr2.id
+
+perl -ane '$inft="-";if(/TU/){@tmp=();while(/(TU\S+)/g){push @tmp,$1}$inft=join",",@tmp}$infm="-";if(/mRNA/){@tmp=();while(/(mRNA\S+)/g){push @tmp,$1}$infm=join",",@tmp}$infa1="-";if(/A1_/){@tmp=();while(/(A1_\S+)/g){push @tmp,$1}$infa1=join",",@tmp}$infa2="-";if(/A2_/){@tmp=();while(/(A2_\S+)/g){push @tmp,$1}$infa2=join",",@tmp};print "$inft\t$infm\t$infa1\t$infa2\n"' all.dup.out >dup.stat
+
+
+perl -MBio::Seq -MBio::SeqIO -e 'my $seqs=Bio::SeqIO->new(-file=>$ARGV[0],-format=>"fasta");while($seq=$seqs->next_seq()){$id=$seq->id();$s=$seq->seq();$t=substr($s,0,1);print "$id\t$t\n"}' Transcript.fa.transdecoder.pep >Tr.M_NM.id
+perl -ane 'if(/>(\S+)/){print "$1\t$F[5]\n"}' Transcript.fa.transdecoder.pep >Tr.ann
+
+perl -ne 'next unless /TU/ && /mRNA/;while(/(TU[^\s,]+)/g){print "$1\n"}' ../all.dup.out |sort |uniq >Tr.T_P.T.id
+perl -ne 'next unless /TU/ && /Chr/;while(/(TU[^\s,]+)/g){print "$1\n"}' ../all.dup.out |sort |uniq >Tr.T_A.T.id
+perl -ne 'next unless /mRNA/ && /Chr/;while(/(mRNA\d+)/g){print "$1\n"}' ../all.dup.out |sort |uniq >Tr.P_A.P.id
+
+perl /disk1/wangsen/Progrm/merge_files.pl -r ../Tr2.id -n 3 -i Tr.T_P.T.id -c 1 -i Tr.T_A.T.id -c 1 -i Tr.M_NM.id -c 1 -i Transcript_Gth.T.id -c 1 -i Transcript_IRGSP.T.id -c 1 -i Transcript_Augustus.T.id -c 1 -i Tr.len -c 1 -i Tr.ann -c 1 -o Tr.id.merge
+
+#Transcript and Protein/Augustus have the same gene structure or contained
+
+awk '$4!="-" || $5!="-"' Tr.id.merge |cut -f 2 |sort |uniq >Tr.Pre.Gid
+awk '$4!="-" || $5!="-"' Tr.id.merge |cut -f 3 |sort |uniq >Tr.Pre.Tid
+
+#Protein has the same structure as Augustus or contained
+perl /disk1/wangsen/Progrm/merge_files.pl -r ../Tr2.id -n 3 -i Tr.P_A.P.id -c 1 -o Tr.id.P_A.merge
+awk '$4!="-"' Tr.id.P_A.merge |cut -f 2 |sort |uniq >Tr.P_A.Gid
+awk '$4!="-"' Tr.id.P_A.merge |cut -f 3 |sort |uniq >Tr.P_A.mid
+
+
+perl /disk1/wangsen/Progrm/get_id.pl Tr.Pre.Gid Tr.P_A.Gid 3 >Tr.P_A.NPre.Gid
+
+
+grep -f Tr.P_A.NPre.Gid Tr.id.merge |grep T_P_A|cut -f2 |sort |uniq >Tr.P_A.NPre.TPA.Gid
+
+
+grep -f Tr.P_A.NPre.TPA.Gid Tr.id.merge |awk '$7=="M"' |cut -f 2 |sort |uniq >Tr.P_A.NPre.TPA.TPre.Gid
+grep -f Tr.P_A.NPre.TPA.Gid Tr.id.merge |awk '$7=="M"' |cut -f 3 |sort |uniq >Tr.P_A.NPre.TPA.TPre.Tid
+
+
+grep -f Tr.P_A.NPre.TPA.TPre.Gid Tr.P_A.NPre.TPA.Gid -v >Tr.P_A.NPre.TPA.P_A.S.Gid
+awk '$4!="-"' Tr.id.P_A.merge |grep -f Tr.P_A.NPre.TPA.P_A.S.Gid |cut -f 3 |sort |uniq >Tr.P_A.NPre.TPA.P_A.S.mid
+
+
+cat Tr.Pre.Gid Tr.P_A.NPre.TPA.Gid >Tr.Pre.TPA.Gid
+perl /disk1/wangsen/Progrm/merge_files.pl -r Tr.id.merge -n 2 -i Tr.Pre.TPA.Gid -c 1 -o Tr.id.merge.merge
+
+
+awk '$1~/T/ && $15=="-" && $7=="M"'  Tr.id.merge.merge |cut -f 2 |sort |uniq >Tr.T.M.Gid
+awk '$1~/T/ && $15=="-" && $7=="M"'  Tr.id.merge.merge |cut -f 3 |sort |uniq >Tr.T.M.Tid
+
+#Dealing with IDs that start with a non-M Transcript protein---(1) The length is greater than 100 and the score value is greater than 10; (2) It does not meet step 1 but has a pfam domain
+awk '$1~/T/ && $15=="-"'  Tr.id.merge.merge|grep -f Tr.T.M.Gid -v >Tr.id.merge.merge.T_NM &
+
+perl -ane 'next unless /TU/;$l=$F[11];$s=$1 if /score=([-\d\.]+)/;if($l>=100 && $s>=10){print}elsif(/PF\d+/){print}' Tr.id.merge.merge.T_NM |cut -f 2 |sort |uniq >Tr.id.merge.merge.T_NM.Selected.Gid
+perl -ane 'next unless /TU/;$l=$F[11];$s=$1 if /score=([-\d\.]+)/;if($l>=100 && $s>=10){print}elsif(/PF\d+/){print}' Tr.id.merge.merge.T_NM |cut -f 3 |sort |uniq >Tr.id.merge.merge.T_NM.Selected.Tid
+
+8.Final result
+(1)remove Augustus ID
+Tr.Pre.Gid
+Tr.P_A.NPre.TPA.TPre.Gid
+Tr.T.M.Gid
+Tr.id.merge.merge.T_NM.Selected.Gid
+cat Tr.Pre.Gid Tr.P_A.NPre.TPA.TPre.Gid Tr.T.M.Gid Tr.id.merge.merge.T_NM.Selected.Gid >Result/Tr.Selected.Del_Au.Gid
+
+(2) keep Transcript ID
+Tr.Pre.Tid
+Tr.P_A.NPre.TPA.TPre.Tid
+Tr.T.M.Tid
+Tr.id.merge.merge.T_NM.Selected.Tid
+cat Tr.Pre.Tid Tr.P_A.NPre.TPA.TPre.Tid Tr.T.M.Tid Tr.id.merge.merge.T_NM.Selected.Tid >Result/Tr.Selected.Tid
+
+(3)removeTranscript and Augustus ID
+cat Tr.P_A.NPre.TPA.P_A.S.Gid >Result/Tr.Selected.Del_TA.Gid
+(4)keep mRNA ID 
+cat Tr.P_A.NPre.TPA.P_A.S.mid >Result/Tr.Selected.mid
+
+
+perl merge_files.pl -r Tr2.id -n 2 -i Tr.Selected.Del_Au.Gid -c 1 -o Tr.Selected.Del_Au.Gid.merge
+perl merge_files.pl -r Tr2.id -n 2 -i Tr.Selected.Del_TA.Gid -c 1 -o Tr.Selected.Del_TA.Gid.merge
+
+awk '$4!="-" && $3~/Chr/{print $3}' Tr.Selected.Del_Au.Gid.merge > Del.A.id
+awk '$4!="-" && ($3~/Chr/||$3~/TU/){print $3}' Tr.Selected.Del_TA.Gid.merge > Del.TA.id
+cat Del.A.id Del.TA.id >Del.id
+
+perl -ane 'BEGIN{open IN,"Del.id";while(<IN>){chomp;@F=split;$ids{$F[0]}=1}}$id=$1 if /Parent=([^;\s]+)/; print unless $ids{$id}' ../../all.selected.gff3 >all.selected.gff3
+
+awk '$4!="-" && $3~/mRNA/{print $3}' Tr.Selected.Del_Au.Gid.merge > Selected.P.id
+
+#Keep the protein ID that has no intersection with Transcript
+
+gffread /Selected.gff3 -g Rice_9311.Genome.fa -o all.cluster.gff3 --cluster-only 
+gffread Selected.gff3 -g Rice_9311.Genome.fa -o all.merge.gff3 -M -d all.dup.out &
+ 
+perl -ne 'if(/ID=([^;\s]+);.*transcripts=(\S+)/){$gene=$1;$trs=$2;print "$gene\t$trs\n" }' all.cluster.gff3 |perl -ane 'if($F[1]=~/TU/ && $F[1]=~/Chr/ && $F[1]=~/mRNA/){print "T_P_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/Chr/){print "T_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/mRNA/){print "T_P\t$_"}elsif($F[1]=~/TU/){print "T\t$_"}elsif($F[1]=~/Chr/ && $F[1]=~/mRNA/){print "P_A\t$_"}elsif($F[1]=~/A1_/ || $F[1]=~/A2_/){print "A\t$_"}elsif($F[1]=~/mRNA/){print "P\t$_"}' >Tr.id
+perl -ane 'for $t(split/,/,$F[2]){print "$F[0]\t$F[1]\t$t\n"}' Tr.id >Tr2.id
+
+grep T_P Tr2.id |grep mRNA |cut -f 3 >Del.P.id
+
+
+perl -ne 'if(/ID=([^;\s]+);.*transcripts=(\S+)/){$gene=$1;$trs=$2;print "$gene\t$trs\n" }' all.cluster.gff3 |perl -ane 'if($F[1]=~/TU/ && $F[1]=~/Chr/ && $F[1]=~/mRNA/){print "T_P_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/Chr/){print "T_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/mRNA/){print "T_P\t$_"}elsif($F[1]=~/TU/){print "T\t$_"}elsif($F[1]=~/Chr/ && $F[1]=~/mRNA/){print "P_A\t$_"}elsif($F[1]=~/A1_/ || $F[1]=~/A2_/){print "A\t$_"}elsif($F[1]=~/mRNA/){print "P\t$_"}' >Tr.id
+perl -ane 'for $t(split/,/,$F[2]){print "$F[0]\t$F[1]\t$t\n"}' Tr.id >Tr2.id
+awk '$1=="P"{print $3}' Tr2.id >Ret.P.id
+
+#Processing Protein ID---highly similar to IRGSP or Augustus blast results, and no similar results to Transcript
+
+cp /Dir/all.selected.gff3 ./
+gffread all.selected.gff3 -g Rice_9311.Genome.fa -o all.cluster.gff3 --cluster-only
+gffread all.selected.gff3 -g Rice_9311.Genome.fa -o all.merge.gff3 -M -d all.dup.out
+
+perl -ne 'if(/ID=([^;\s]+);.*transcripts=(\S+)/){$gene=$1;$trs=$2;print "$gene\t$trs\n" }' all.cluster.gff3 |perl -ane 'if($F[1]=~/TU/ && $F[1]=~/Chr/ && $F[1]=~/mRNA/){print "T_P_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/Chr/){print "T_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/mRNA/){print "T_P\t$_"}elsif($F[1]=~/TU/){print "T\t$_"}elsif($F[1]=~/Chr/ && $F[1]=~/mRNA/){print "P_A\t$_"}elsif($F[1]=~/A1_/ && $F[1]=~/A2_/){print "A\t$_"}elsif($F[1]=~/mRNA/){print "P\t$_"}' >Tr.id
+perl -ane 'for $t(split/,/,$F[2]){print "$F[0]\t$F[1]\t$t\n"}' Tr.id >Tr2.id
+
+awk '($1=="P" ||$1=="P_A") && $3~/mRNA/' Tr2.id  >Tr.P.id
+
+perl merge_files.pl -r Tr.P.id -n 3 -i Gth_Transcript.G.id -c 1 -i Gth_IRGSP.G.id -c 1 -i Gth_Augustus.A.id -c 1 -o Tr.P.id.merge
+
+perl merge_files.pl -r ../Run2/Ret.P.id -n 1 -i Gth_Transcript.G.id -c 1 -i Gth_IRGSP.G.id -c 1 -i Gth_Augustus.A.id -c 1 -o Ret.P.id.merge
+
+awk '$4=="-" && ($5!="-" ||$6!="-"){print $3}' Tr.P.id.merge >Tr.P.aln.id
+awk '$2=="-" && ($3!="-" ||$4!="-"){print $1}' Ret.P.id.merge >Ret.aln.id
+cat Tr.P.aln.id Ret.aln.id |sort |uniq >Prot.aln.id
+
+#Processing Augustus ID---(1) The blast results of IRGSP or Protein are highly similar, and there is no similar result to Transcript; (2) The two prediction results are consistent
+
+cp /Dir/all.selected.gff3 ./
+gffread all.selected.gff3 -g Rice_9311.Genome.fa -o all.cluster.gff3 --cluster-only
+gffread all.selected.gff3 -g Rice_9311.Genome.fa -o all.merge.gff3 -M -d all.dup.out
+
+perl -ne 'if(/ID=([^;\s]+);.*transcripts=(\S+)/){$gene=$1;$trs=$2;print "$gene\t$trs\n" }' all.cluster.gff3 |perl -ane 'if($F[1]=~/TU/ && $F[1]=~/Chr/ && $F[1]=~/mRNA/){print "T_P_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/Chr/){print "T_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/mRNA/){print "T_P\t$_"}elsif($F[1]=~/TU/){print "T\t$_"}elsif($F[1]=~/Chr/ && $F[1]=~/mRNA/){print "P_A\t$_"}elsif($F[1]=~/A1_/ && $F[1]=~/A2_/){print "A\t$_"}elsif($F[1]=~/mRNA/){print "P\t$_"}' >Tr.id
+perl -ane 'for $t(split/,/,$F[2]){print "$F[0]\t$F[1]\t$t\n"}' Tr.id >Tr2.id
+
+awk '$1=="A"' Tr2.id  >Tr.A.id
+sed 's/^/A1_/' /Dir/Au1.Tpm.id >Au1.Tpm.id
+sed 's/^/A2_/' /Dir/Au2.Tpm.id >Au2.Tpm.id
+cat Au1.Tpm.id Au2.Tpm.id >Au.tpm.id
+
+perl -ane 'if(/A1/ && /A2/){while(/(A1_[^,\s]+)/g){print "$1\n"}while(/(A2_[^,\s]+)/g){print "$1\n"}}' all.dup.out >A1_A2.id
+perl merge_files.pl -r Tr.A.id -n 3 -i Au.tpm.id -c 1 -i A1_A2.id -c 1 -o Tr.A.id.tpm.merge
+
+sed 's/^/A1_/' Augustus_Transcript.A.id > Augustus_Transcript.A.id
+sed 's/^/A1_/' Augustus_Gth.A.id > Augustus_Gth.A.id
+sed 's/^/A1_/' Augustus_IRGSP.A.id > Augustus_IRGSP.A.id
+
+perl merge_files.pl -r Tr.A.id -n 3 -i Au.tpm.id -c 1 -i A1_A2.id -c 1 -i Augustus_Transcript.A.id -c 1 -i Augustus_Gth.A.id -c 1 -i Augustus_IRGSP.A.id -c 1 -o Tr.A.id.tpm.merge
+
+perl merge_files.pl -r Au.all.id -n 1 -i Au.tpm.id -c 1 -i Augustus_Transcript.A.id -c 1 -i Augustus_Gth.A.id -c 1 -i Augustus_IRGSP.A.id -c 1 -o Au.all.id.merge
+
+awk '$3=="-" &&($2!="-" ||$4!="-" || $5!="-"){print $1}' Au.all.id.merge >Au.all.aln.id
+awk '$6=="-" &&($4!="-" || $5!="-" || $7!="-" || $8!="-"){print $3}' Tr.A.id.tpm.merge >Tr.A.id.tpm.merge.aln.id
+cat Au.all.aln.id Tr.A.id.tpm.merge.aln.id >Au.aln.id
+
+#Handling of overlapping IDs between Protein and Augustus
+
+cp ../Run1/Result/Tr.Selected.mid ../Run1/Result/Tr.Selected.Tid ./
+cp ../Run3/Prot.aln.id ./
+cp ../Run4/Au.aln.id ./
+
+cat Tr.Selected.Tid Tr.Selected.mid Prot.aln.id Au.aln.id >Selected.id
+
+perl -ane 'BEGIN{open IN,"Selected.id";while(<IN>){chomp;@F=split;$ids{$F[0]}=1}}$id=$1 if /Parent=([^;\s]+)/; print if $ids{$id}' ../all.selected.gff3 >all.selected.gff3
+
+gffread all.selected.gff3 -g Rice_9311.Genome.fa -o all.cluster.gff3 --cluster-only
+gffread all.selected.gff3 -g Rice_9311.Genome.fa -o all.merge.gff3 -M -d all.dup.out
+
+perl -ne 'if(/ID=([^;\s]+);.*transcripts=(\S+)/){$gene=$1;$trs=$2;print "$gene\t$trs\n" }' all.cluster.gff3 |perl -ane 'if($F[1]=~/TU/ && $F[1]=~/Chr/ && $F[1]=~/mRNA/){print "T_P_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/Chr/){print "T_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/mRNA/){print "T_P\t$_"}elsif($F[1]=~/TU/){print "T\t$_"}elsif($F[1]=~/Chr/ && $F[1]=~/mRNA/){print "P_A\t$_"}elsif($F[1]=~/A1_/ && $F[1]=~/A2_/){print "A\t$_"}elsif($F[1]=~/mRNA/){print "P\t$_"}' >Tr.id
+perl -ane 'for $t(split/,/,$F[2]){print "$F[0]\t$F[1]\t$t\n"}' Tr.id >Tr2.id
+
+awk '$1=="P_A" && $3~/Chr/{print $3}' Tr2.id >del.A.id
+perl -ane 'BEGIN{open IN,"del.A.id"pwd;while(<IN>){chomp;@F=split;$ids{$F[0]}=1}}$id=$1 if /Parent=([^;\s]+)/; print unless $ids{$id}' all.selected.gff3 >all.selected.DelA.gff3
+
+
+cp ../Run5/all.selected.DelA.gff3  ./
+
+gffread all.selected.DelA.gff3 -g Rice_9311.Genome.fa -o all.cluster.gff3 --cluster-only
+gffread all.selected.DelA.gff3 -g Rice_9311.Genome.fa -o all.merge.gff3 -M -d all.dup.out
+
+perl -ne 'if(/ID=([^;\s]+);.*transcripts=(\S+)/){$gene=$1;$trs=$2;print "$gene\t$trs\n" }' all.cluster.gff3 |perl -ane 'if($F[1]=~/TU/ && $F[1]=~/Chr/ && $F[1]=~/mRNA/){print "T_P_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/Chr/){print "T_A\t$_"}elsif($F[1]=~/TU/ && $F[1]=~/mRNA/){print "T_P\t$_"}elsif($F[1]=~/TU/){print "T\t$_"}elsif($F[1]=~/Chr/ && $F[1]=~/mRNA/){print "P_A\t$_"}elsif($F[1]=~/A1_/ || $F[1]=~/A2_/){print "A\t$_"}elsif($F[1]=~/mRNA/){print "P\t$_"}' >Tr.id
+perl -ane 'for $t(split/,/,$F[2]){print "$F[0]\t$F[1]\t$t\n"}' Tr.id >Tr2.id
+
+perl -ane 'if($F[2]=~/locus/){$id=$1 if /ID=([^;\s]+)/;print "$id\t$F[0]\t$F[3]\t$F[4]\t$F[6]\n"}' all.cluster.gff3 >all.pos
+
+perl -ane 'BEGIN{open IN, "all.pos" or die $!;while(<IN>){chomp;@A=split;$pos{$A[1]}{"$A[2],$S[3]"}=$_;}close IN;}for $se(keys %{$pos{$F[1]}}){($s,$e)=split/,/,$se;next if $s==$F[2] && $e==$F[3];next if $s >$F[3] ||$e < $F[2];print "$_\t$pos{$F[1]}{$se}\n";}' all.pos > all.pos.merge
+
+
+#Gene ID with best protein match
+cp /Dir/Result/Stat/* ./
+rm Gth_Transcript.T.id Transcript_Augustus.A.id Transcript_Gth.G.id Transcript_IRGSP.I.id
+cp /Dir/Result/Stat/Augustus_Gth.A.id /Dir/Result/Stat/Augustus_IRGSP.A.id ./
+cp /Dir/Result//Stat/Gth_Augustus.G.id /Dir/Result/Stat/Gth_IRGSP.G.id ./
+cat Transcript_*.id |sort |uniq >Transcript.id &
+cat Augustus_*.id |sort |uniq >Augustus.id &
+cat Gth_*.id |sort |uniq >Gth.id &
+
+cat Transcript.id Gth.id Augustus.id >all.Match.id
+
+#The first amino acid of the corresponding protein of all genes
+cp /Dir/Run1/Tr.M_NM.id ./
+cp /Dir/Gth.M_NM.id ./
+grep Chr ../Tr2.id |cut -f 3 >Augustus.N_NM.id.tmp
+perl -pe 's/$/\tM/' Augustus.N_NM.id.tmp >Augustus.N_NM.id
+
+cat Tr.M_NM.id Gth.M_NM.id Augustus.N_NM.id >all.N_NM.id
+
+perl merge_files.pl -r ../Tr2.id -n 3 -i all.Match.id -c 1 -i all.N_NM.id -c 1 -o all.merge
+
+#Analyze the attributes of overlapping genes and select the best one
+perl stat.pl ../data/all.merge ../all.pos.merge >Overlap.filter.id 2>Overlap.all.mark
+
+#Filter out the deleted gene ID
+perl merge_files.pl -r Overlap.all.mark -n 1 -i Overlap.filter.id -c 1 -o Overlap.all.mark.merge
+
+#deleted gene ID is Transcript and does not start with M, and the second one is non-Transcript
+awk '$13=="-" && $11~/T/ &&$12!~/T/ && $11!~/M/'  Overlap.all.mark.merge |perl -ane 'print "$F[1]:$F[2]-$F[3]\t$_"' >Overlap.TM_NT.infor_mark
+#Manually checked
+
+vi del.Re.id.tmp#Remove from reserved ID
+sort del.Re.id.tmp |uniq >del.Re.id
+
+vi ad.De.id.tmp#Retrieve from deleted ID
+sort ad.De.id.tmp |uniq >ad.De.id
+
+perl -ane 'print "$F[0]\n$F[5]\n"' Overlap.all.mark |sort |uniq >Overlap.all.id
+sort Overlap.filter.id |uniq >Overlap.filter.uniq.id
+
+
+
+
+cat ../Analysis/ad.De.id ../Analysis/Overlap.filter.uniq.id |grep -f ../Analysis/del.Re.id - -v >Overlap.Re.id
+perl /disk1/wangsen/Progrm/get_id.pl ../Analysis/Overlap.all.id Overlap.Re.id 2 >Overlap.Del.id
+
+vi Overlap.Del.id 
+vi Overlap.Del.Tid
+vi Re.id
+
+perl get_id.pl Overlap.Del.Tid Re.id 2 >Overlap.Del.new.Tid
+cut -f 3 ../Tr2.id  >all.Tr.id
+perl get_id.pl all.Tr.id Re.id 3 >Re.new.id
+
+perl -ane 'BEGIN{open IN,"Re.new.id";while(<IN>){chomp;@F=split;$ids{$F[0]}=1}}$id=$1 if /Parent=([^;\s]+)/; print if $ids{$id}' all.gff3 >Re.gff3
+
+perl -ane 'BEGIN{open IN,"Overlap.Del.new.Tid";while(<IN>){chomp;@F=split;$ids{$F[0]}=1}}$id=$1 if /Parent=([^;\s]+)/; print unless $ids{$id}' Run6/all.selected.DelA.gff3 >Re2.gff3
+
+cat Re.gff3 Re2.gff3 >Re.all.gff3
+sed 's/exon/CDS/' Re.all.gff3 -i
+
+gffread Re.all.gff3 -g Rice_9311.Genome.fa -o all.cluster.gff3 --cluster-only
+gffread Re.all.gff3 -g Rice_9311.Genome.fa -o all.merge.gff3 -M -d all.dup.out
+
+#Re-Naming
+
+
+cp /Dir/Run6/Filter/all.merge.gff3 ./
+
+perl -ane 'if($F[2] eq "locus"){$c++;$n=sprintf"%05d",$c;$ido=$1 if /ID=([^;]+)/;$id=($F[0]=~/Chr(\d+)/)?"R9311C$1g$n":"R9311Un0g$n";print "$F[0]\tGenePre\tgene\t$F[3]\t$F[4]\t.\t$F[6]\t.\tID=$id;\n";print STDERR "$ido\t$id\n";$m=0}elsif($F[2] eq "mRNA"){$ido=$1 if /ID=([^;]+)/;$m++;print "$F[0]\tGenePre\tmRNA\t$F[3]\t$F[4]\t.\t$F[6]\t.\tID=$id.t$m;Parent=$id;\n";print STDERR "$ido\t$id.t$m\n";$hash{$ido}="$id.t$m"}elsif($F[2] eq "CDS"){$ido=$1 if /Parent=([^;\s]+)/;$tid=$hash{$ido};print "$F[0]\tGenePre\tCDS\t$F[3]\t$F[4]\t.\t$F[6]\t.\tID=$tid.cds;Parent=$tid;\n";}' all.merge.gff3 > R9311.Rename.gff3 2> Tr.id
+
+#PASA
+nohup seqclean Transcript.fa -c 16 >seqclean.stdout 2>seqclean.stderr &
+
+nohup Launch_PASA_pipeline.pl -c alignAssembly.config -C -R --ALIGNERS gmap -g Rice_9311.Genome.fa -t Transcript.fa.clean -T -u Transcript.fa --CPU 64 >Launch_PASA_pipeline.stdout 2>Launch_PASA_pipeline.stderr &
+/public/home/wangsen01/miniconda2/opt/pasa-2.3.3/scripts/pasa_asmbls_to_training_set.dbi --pasa_transcripts_fasta Rice.assemblies.fasta --pasa_transcripts_gff3 Rice.pasa_assemblies.gff3 > pasa_asmbls_to_training_set.stdout 2> pasa_asmbls_to_training_set.stderr &
+
+perl -ane 'if($F[2] eq "CDS"){$id=$_;$id=~s/CDS/exon/;$id=~s/cds/exon/;print "$id"}print' R9311.Rename.gff3 >R9311.Rename.new.gff3
+
+nohup /public/home/wangsen01/miniconda2/opt/pasa-2.3.3/scripts/Load_Current_Gene_Annotations.dbi -c alignAssembly.config -g Rice_9311.Genome.fa -P R9311.Rename.new.gff3 > Load_Current_Gene_Annotations.stdout 2> Load_Current_Gene_Annotations.stderr &
+
+cp  /public/home/wangsen01/miniconda2/opt/pasa-2.3.3/pasa_conf/pasa.annotationCompare.Template.txt annotationCompare.config
+
+nohup /public/home/wangsen01/miniconda2/opt/pasa-2.3.3/Launch_PASA_pipeline.pl -c annotationCompare.config -A -g Rice_9311.Genome.fa -t Transcript.fa.clean --CPU 32 >annotCompare.log 2>annotCompare.error &
+
+
+grep PASA_UPDATE Rice.gene_structures_post_PASA_updates.26958.gff3 |perl -ne 'print "$1\n" if /(R9311C\w+\.t\d+)/' >update.Tr.id
+grep PASA_UPDATE Rice.gene_structures_post_PASA_updates.26958.gff3 |perl -ne 'print "$1\n" if /(R9311C\w+)/' >update.id
+
+grep TU /disk2/wangsen/9311/9311-New/GenePre/Result/Final/Tr.id |perl  -ne 'print "$1\n" if /(R9311C\w+)/' >all.Tu.id
+
+perl /disk1/wangsen/Progrm/get_id.pl all.Tu.id update.id 3|sort |uniq >update.uniq.id
+grep -f update.uniq.id update.Tr.id >update.uniq.Tr.id
+
+grep UTR Rice.gene_structures_post_PASA_updates.26958.gff3 |perl -ne 'print "$1\n" if /Parent=(\w+\.t\d+)/' |sort |uniq  >UTR.id
+grep -f update.uniq.Tr.id UTR.id >update.uniq.Tr.UTR.id
+
+grep -f update.uniq.Tr.UTR.id Rice.gene_structures_post_PASA_updates.26958.gff3 |grep -v '#' >update.uniq.gff3
+
+perl -ane 'if($F[2] eq "CDS"){$id=$_;$id=~s/CDS/exon/;$id=~s/cds/exon/;print "$id"}print' /disk2/wangsen/9311/9311-New/GenePre/Result/Final/R9311.Rename.gff3 >R9311.Rename.new.gff3
+
+perl update.pl R9311.Rename.new.gff3 Transcript.fa.transdecoder.genome.gff3 Tr.id update.uniq.gff3 >R9311.update.gff3.tmp 2>error &
+
+perl -ane 'if($F[2] eq "mRNA"){$id=$1 if /Parent=([^;\s]+)/;$inf{$id}->{Chr}=$F[0];$inf{$id}->{Ori}=$F[6];push @{$ses{$id}},$F[3];push @{$ses{$id}},$F[4];}END{for $se(sort keys %ses){@se=sort{$a<=>$b}@{$ses{$se}};print "$se\t$inf{$se}->{Chr}\t$se[0]\t$se[$#se]\t$inf{$se}->{Ori}\n"}}' R9311.update.gff3.tmp >R9311.update.Gid
+
+perl -ane 'BEGIN{open GFF,"R9311.update.gff3.tmp";while(<GFF>){chomp;my $Gid=$1 if /ID=([^;\s\.]+)/;push @{$infs{$Gid}},$_;}close GFF;}print "$F[1]\tGenePre\tgene\t$F[2]\t$F[3]\t.\t$F[4]\t.\tID=$F[0]\n";for my $inf(@{$infs{$F[0]}}){print "$inf\n";}'  R9311.update.Gid  > R9311.update.gff3
+

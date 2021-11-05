@@ -1,0 +1,95 @@
+
+library(WGCNA)
+library(reshape2)
+library(stringr)
+options(stringsAsFactors = FALSE)
+enableWGCNAThreads(nThreads=16)
+
+type = "unsigned"
+corType = "pearson"
+
+rsem=read.table("R9311.gene.F1.log2.tpm",header = T,row.names=1,quote="", comment="", check.names=F)
+
+dataExpr <- as.data.frame(t(rsem))
+gsg = goodSamplesGenes(dataExpr, verbose = 3)
+gsg$allOK
+
+pdf("R9311.gene.sampleTree.pdf")
+sampleTree = hclust(dist(dataExpr), method = "average")
+par(cex = 0.6)
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5   ,cex.axis = 1.5, cex.main = 2)
+dev.off()
+
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5   ,cex.axis = 1.5, cex.main = 2)
+powers = c(c(1:10), seq(from = 12, to=30, by=2))
+sft = pickSoftThreshold(dataExpr, powerVector = powers, networkType=type,  RsquaredCut = 0.80,verbose = 5)
+sft
+powerE = sft$powerEstimate
+powerE
+
+pdf("R9311.gene.power.pdf")
+par(mfrow = c(1,2))
+cex1 = 0.9
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",main = paste("Scale independence"   ))
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],labels=powers,cex=cex1,col="red")
+abline(h=0.8,col="green")
+plot(sft$fitIndices[,1], sft$fitIndices[,5],xlab="Soft Threshold (power)",ylab="Mean Connectiv   ity", type="n", main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+dev.off()
+
+nGenes = ncol(dataExpr)
+nSamples = nrow(dataExpr)
+
+net = blockwiseModules(dataExpr, power =12, maxBlockSize = nGenes,TOMType = type, minModuleSize = 30,reassignThreshold = 0, mergeCutHeight = 0.1,numericLabels = TRUE, pamRespectsDendro = FALSE,saveTOMs = TRUE,corType = corType, loadTOMs=TRUE, saveTOMFileBase = "R9311.gene.TOMFileBase",verbose = 3)
+
+moduleLabels = net$colors
+moduleColors = labels2colors(moduleLabels)
+table(net$colors)
+write.table(moduleColors,"R9311.gene.Gene_color.out",quote = F, sep = "\t",row.names=colnames(dataExpr),col.names="")
+
+pdf("R9311.gene.module.pdf")
+plotDendroAndColors(net$dendrograms[[1]], moduleColors[net$blockGenes[[1]]],"Module colors",dendroLabels = FALSE, hang = 0.03,addGuide = TRUE, guideHang = 0.05)
+dev.off()
+
+MEs = net$MEs
+MEs_col = MEs
+colnames(MEs_col) = paste0("ME", labels2colors(as.numeric(str_replace_all(colnames(MEs),"ME",""))))
+MEs_col = orderMEs(MEs_col)
+
+pdf("R9311.gene.EigengeneNetwork.pdf")
+plotEigengeneNetworks(MEs_col, "Eigengene adjacency heatmap", marDendro = c(3,3,2,4),marHeatmap = c(3,4,2,2), plotDendrograms = T,  xLabelsAngle = 90)
+dev.off()
+
+load(net$TOMFiles[1], verbose=T)
+TOM <- as.matrix(TOM)
+dissTOM = 1-TOM
+plotTOM = dissTOM^7
+diag(plotTOM) = NA
+
+traitData <- read.table(file="R9311.trait", sep='\t', header=T, row.names=1,check.names=FALSE, comment='',quote="")
+sampleName = rownames(dataExpr)
+traitData = traitData[match(sampleName, rownames(traitData)), ]
+modTraitCor = cor(MEs_col, traitData, use = "p")
+modTraitP = corPvalueStudent(modTraitCor, nSamples)
+
+pdf("R9311.gene.labeledHeatmap.pdf")
+textMatrix = paste(signif(modTraitCor, 2), "\n(", signif(modTraitP, 1), ")", sep = "")
+dim(textMatrix) = dim(modTraitCor)
+labeledHeatmap(Matrix = modTraitCor, xLabels = colnames(traitData), yLabels = colnames(MEs_col), cex.lab = 0.5, ySymbols = colnames(MEs_col), colorLabels = FALSE, colors = blueWhiteRed(50), textMatrix = textMatrix, setStdMargins = FALSE, cex.text = 0.5, zlim = c(-1,1),main = paste("Module-trait relationships"))
+dev.off()
+
+geneModuleMembership = as.data.frame(cor(dataExpr, MEs_col, use = "p"))
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+
+geneTraitCor = as.data.frame(cor(dataExpr, traitData, use = "p"))
+geneTraitP = as.data.frame(corPvalueStudent(as.matrix(geneTraitCor), nSamples))
+
+write.table(geneModuleMembership,"R9311.gene.geneModuleMembership.out",quote = F, sep = "\t")
+write.table(MMPvalue,"R9311.gene.MMPvalue.out",quote = F, sep = "\t")
+write.table(geneTraitCor,"R9311.gene.geneTraitCor.out",quote = F, sep = "\t")
+write.table(geneTraitP,"R9311.gene.geneTraitP.out",quote = F, sep = "\t")
+
+probes = colnames(dataExpr)
+dimnames(TOM) <- list(probes, probes)
+cyt = exportNetworkToCytoscape(TOM, edgeFile = "R9311.edge.txt" ,nodeFile = "R9311.node.txt", weighted = TRUE, threshold = 0, nodeNames = probes, nodeAttr = moduleColors)
