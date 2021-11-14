@@ -17,12 +17,12 @@
 # R9311_STS-WGCNA.r				####### WGCNA analysis for STS
 
 
-#Gene Annotation
+# Gene Annotation
 
-#R9311.gff3.gz			#Gene structure
-#R9311.coding.fa.gz		#Coding sequences
-#R9311.protein.fa.gz	#Protein sequences
-#R9311.interpro.gz		#Interpro
-#R9311.K.gz				#KEGG
-#R9311.nr.gz			#NR 
+# R9311.gff3.gz			####### Gene structure
+# R9311.coding.fa.gz		####### Coding sequences
+# R9311.protein.fa.gz	####### Protein sequences
+# R9311.interpro.gz		####### Interpro
+# R9311.K.gz				####### KEGG
+# R9311.nr.gz			####### NR 
 
