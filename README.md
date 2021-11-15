@@ -1,4 +1,4 @@
-# 93-11 genome
+# 93-11 genome analysis and gene annotation
 
 # Custom code for 93-11 genome assembly project, including gene prediction, WGCNA, PAML analysis
 
